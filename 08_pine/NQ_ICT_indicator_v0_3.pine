@@ -1,0 +1,118 @@
+//@version=6
+// =====================================================================
+// NQ ICT A+ Indicator — v0.3  (companion to the strategy; deliverable J)
+// Visualizes the SAME non-repainting ICT logic (FVG / MSS / sweep /
+// killzone / bias / news blackout) + alertcondition() flags + info table.
+// Indicator-only: no strategy.* calls; alertcondition is legal here.
+// =====================================================================
+indicator("NQ ICT A+ Indicator v0.3", overlay=true, max_labels_count=200)
+
+// ---- inputs (mirror strategy) ----
+useKZ   = input.bool(true, "NY AM killzone filter", group="Session")
+kzStart = input.int(7,  "KZ start (ET)", group="Session")
+kzEnd   = input.int(11, "KZ end (ET)",   group="Session")
+pivLen  = input.int(5,  "Pivot lookback", group="Structure")
+seqWin  = input.int(12, "Sequence window", group="Structure")
+useFVG     = input.bool(true,  "Require recent FVG", group="FVG")
+fvgAtrMin  = input.float(0.20, "Min FVG (xATR)", step=0.05, group="FVG")
+fvgWin     = input.int(4, "FVG recency", group="FVG")
+useSweep   = input.bool(true, "Require sweep", group="Sweep")
+sweepLook  = input.int(20, "Sweep lookback", group="Sweep")
+useFib  = input.bool(true, "Discount/premium filter", group="Fib")
+useBias = input.bool(true, "Daily bias filter", group="Bias")
+useNews   = input.bool(true, "News blackout", group="News")
+preMin    = input.int(3,  "Pre (min)", group="News")
+postMin   = input.int(15, "Post (min)", group="News")
+atrLen     = input.int(14, "ATR length", group="Risk")
+stopAtrMlt = input.float(1.5, "Stop xATR", step=0.1, group="Risk")
+rr         = input.float(2.0, "Reward:Risk", step=0.25, group="Risk")
+showFVG    = input.bool(true, "Draw FVG boxes", group="Display")
+
+atr = ta.atr(atrLen)
+
+dOpen = request.security(syminfo.tickerid, "D", open,  lookahead=barmerge.lookahead_off)
+pdH   = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
+pdL   = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_off)
+biasLong  = not useBias or (close > dOpen and close > pdL)
+biasShort = not useBias or (close < dOpen and close < pdH)
+
+inKZ = not useKZ or not na(time(timeframe.period, str.format("{0,number,00}00-{1,number,00}00", kzStart, kzEnd), "America/New_York"))
+
+etMin = hour(time, "America/New_York")*60 + minute(time, "America/New_York")
+inWin(ev) => etMin >= ev-preMin and etMin <= ev+postMin
+blackout = useNews and ( inWin(8*60+30) or inWin(10*60) )
+
+ph = ta.pivothigh(high, pivLen, pivLen)
+pl = ta.pivotlow(low,  pivLen, pivLen)
+var float lastPH = na
+var float lastPL = na
+if not na(ph)
+    lastPH := ph
+if not na(pl)
+    lastPL := pl
+
+rngHi = ta.highest(high, sweepLook)
+rngLo = ta.lowest(low,  sweepLook)
+fibMid = (rngHi + rngLo) / 2.0
+inDiscount = close < fibMid
+inPremium  = close > fibMid
+
+bullFVG = (low > high[2]) and ((low - high[2]) >= fvgAtrMin * atr)
+bearFVG = (high < low[2]) and ((low[2] - high) >= fvgAtrMin * atr)
+
+prevHigh = ta.highest(high[1], sweepLook)
+prevLow  = ta.lowest(low[1],  sweepLook)
+sweptHi = high > prevHigh and close < prevHigh
+sweptLo = low  < prevLow  and close > prevLow
+
+mssUpEvent   = not na(lastPH) and close > lastPH and close[1] <= lastPH
+mssDownEvent = not na(lastPL) and close < lastPL and close[1] >= lastPL
+
+bsSweepLo = ta.barssince(sweptLo)
+bsSweepHi = ta.barssince(sweptHi)
+bsBullF   = ta.barssince(bullFVG)
+bsBearF   = ta.barssince(bearFVG)
+bsMSSup   = ta.barssince(mssUpEvent)
+sweepLoRecent = bsSweepLo <= seqWin
+sweepHiRecent = bsSweepHi <= seqWin
+bullFvgRecent = bsBullF <= fvgWin
+bearFvgRecent = bsBearF <= fvgWin
+
+longSetup  = biasLong  and inKZ and not blackout and mssUpEvent   and (not useSweep or sweepLoRecent) and (not useFVG or bullFvgRecent) and (not useFib or inDiscount)
+shortSetup = biasShort and inKZ and not blackout and mssDownEvent and (not useSweep or sweepHiRecent) and (not useFVG or bearFvgRecent) and (not useFib or inPremium)
+
+// ---- FVG boxes (visual; capped) ----
+if showFVG and bullFVG
+    box.new(bar_index-2, low, bar_index, high[2], border_color=color.new(color.teal,40), bgcolor=color.new(color.teal,85))
+if showFVG and bearFVG
+    box.new(bar_index-2, low[2], bar_index, high, border_color=color.new(color.maroon,40), bgcolor=color.new(color.maroon,85))
+
+// ---- entry/SL/TP preview labels ----
+if longSetup
+    s = math.min(low, low[1]) - stopAtrMlt*atr
+    label.new(bar_index, low, "L "+str.tostring(math.round_to_mintick(close))+" / sl "+str.tostring(math.round_to_mintick(s)), style=label.style_label_up, color=color.new(color.green,20), textcolor=color.white, size=size.small)
+if shortSetup
+    s = math.max(high, high[1]) + stopAtrMlt*atr
+    label.new(bar_index, high, "S "+str.tostring(math.round_to_mintick(close))+" / sl "+str.tostring(math.round_to_mintick(s)), style=label.style_label_down, color=color.new(color.red,20), textcolor=color.white, size=size.small)
+
+plotshape(longSetup,  title="Long",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.tiny)
+plotshape(shortSetup, title="Short", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.tiny)
+bgcolor(inKZ ? color.new(color.blue, 92) : na, title="Killzone")
+bgcolor(blackout ? color.new(color.orange, 80) : na, title="News blackout")
+
+// ---- info table (trade-logging-style dashboard) ----
+var table t = table.new(position.top_right, 2, 7, border_width=1)
+f(r, k, v, col) =>
+    table.cell(t, 0, r, k, text_color=color.white, text_size=size.small, bgcolor=color.new(color.gray,70))
+    table.cell(t, 1, r, v, text_color=col, text_size=size.small, bgcolor=color.new(color.black,60))
+if barstate.islast
+    f(0,"Bias", biasLong?"LONG":biasShort?"SHORT":"none", biasLong?color.lime:biasShort?color.red:color.gray)
+    f(1,"In KZ", inKZ?"yes":"no", inKZ?color.lime:color.gray)
+    f(2,"Blackout", blackout?"NEWS":"clear", blackout?color.orange:color.lime)
+    f(3,"Discount/Prem", inDiscount?"discount":"premium", color.white)
+    f(4,"Last sweepLo", str.tostring(bsSweepLo)+"b", color.white)
+    f(5,"Last MSS up", str.tostring(bsMSSup)+"b", color.white)
+    f(6,"Setup", longSetup?"LONG A+":shortSetup?"SHORT A+":"-", longSetup?color.lime:shortSetup?color.red:color.gray)
+
+alertcondition(longSetup,  title="ICT Long Setup",  message="NQ ICT A+ LONG setup")
+alertcondition(shortSetup, title="ICT Short Setup", message="NQ ICT A+ SHORT setup")

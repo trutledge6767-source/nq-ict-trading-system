@@ -1,0 +1,194 @@
+//@version=6
+// =====================================================================
+// NQ ICT A+ Strategy — v0.4  (adds PARTIAL-PROFIT + BREAKEVEN)
+// vs v0.3: bank partialFrac at +partialAtR R, move remainder stop to BE,
+// run rest to RR target. Study (10_risk/PARTIAL_PROFIT_STUDY.md) showed
+// this ~cut max DD ~70% and tripled funded-pass prob on a no-edge series.
+// NON-REPAINTING: confirmed pivots, closed-bar FVG, lookahead_off HTF,
+//   process_orders_on_close=true.
+// =====================================================================
+strategy("NQ ICT A+ v0.4", overlay=true, pyramiding=0,
+     default_qty_type=strategy.fixed, default_qty_value=1,
+     initial_capital=50000, commission_type=strategy.commission.cash_per_contract,
+     commission_value=2.10, slippage=2, calc_on_every_tick=false,
+     process_orders_on_close=true)
+
+grpKZ   = "Session / Killzone (ET)"
+useKZ   = input.bool(true,  "Use NY AM killzone filter", group=grpKZ)
+kzStart = input.int(7,  "KZ start hour (ET)", minval=0, maxval=23, group=grpKZ)
+kzEnd   = input.int(11, "KZ end hour (ET)",   minval=0, maxval=23, group=grpKZ)
+
+grpStr  = "Structure / Pivots"
+pivLen  = input.int(5,  "Pivot lookback (L=R bars)", minval=2, group=grpStr)
+seqWin  = input.int(12, "Sequence window (bars)",    minval=2, group=grpStr)
+
+grpFVG  = "FVG"
+useFVG     = input.bool(true,  "Require recent FVG", group=grpFVG)
+fvgAtrMin  = input.float(0.20, "Min FVG size (xATR)", step=0.05, group=grpFVG)
+fvgWin     = input.int(4, "FVG recency (bars)", minval=1, group=grpFVG)
+
+grpSweep = "Liquidity Sweep"
+useSweep   = input.bool(true, "Require recent liquidity sweep", group=grpSweep)
+sweepLook  = input.int(20, "Sweep lookback bars", minval=5, group=grpSweep)
+
+grpFib  = "Premium/Discount"
+useFib  = input.bool(true, "Discount longs / premium shorts only", group=grpFib)
+
+grpBias = "HTF Bias"
+useBias = input.bool(true, "Use daily bias filter", group=grpBias)
+
+grpNews = "News Blackout (ET)"
+useNews   = input.bool(true, "Enable news blackout", group=grpNews)
+nb0830    = input.bool(true, "Block 08:30 cluster", group=grpNews)
+nb1000    = input.bool(true, "Block 10:00 cluster", group=grpNews)
+preMin    = input.int(3,  "Pre-event block (min)",  minval=0, group=grpNews)
+postMin   = input.int(15, "Post-event block (min)", minval=0, group=grpNews)
+isFomcDay = input.bool(false, "TODAY is FOMC day", group=grpNews)
+
+grpRisk = "Risk"
+atrLen      = input.int(14, "ATR length", group=grpRisk)
+stopAtrMlt  = input.float(1.5, "Stop buffer (xATR)", step=0.1, group=grpRisk)
+rr          = input.float(2.0, "Reward:Risk target", step=0.25, group=grpRisk)
+usePartial  = input.bool(true, "Partial profit + breakeven", group=grpRisk)
+partialPct  = input.float(50, "Partial size (% at +partialAtR R)", minval=0, maxval=100, group=grpRisk)
+partialAtR  = input.float(1.0, "Partial at (R)", step=0.25, group=grpRisk)
+riskPct     = input.float(0.5, "Risk % equity / trade", step=0.1, group=grpRisk) / 100.0
+maxContracts= input.int(10, "Max contracts cap", minval=1, group=grpRisk)
+maxTradesD  = input.int(3, "Max trades per day", minval=1, group=grpRisk)
+dailyLossR  = input.float(2.0, "Daily loss limit (R)", step=0.5, group=grpRisk)
+weeklyLossR = input.float(4.0, "Weekly loss limit (R)", step=0.5, group=grpRisk)
+maxConsecL  = input.int(3, "Consecutive-loss lockout", minval=1, group=grpRisk)
+pointValue  = input.float(20.0, "$ per point (NQ=20)", group=grpRisk)
+
+atr = ta.atr(atrLen)
+
+dOpen = request.security(syminfo.tickerid, "D", open,  lookahead=barmerge.lookahead_off)
+pdH   = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
+pdL   = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_off)
+biasLong  = not useBias or (close > dOpen and close > pdL)
+biasShort = not useBias or (close < dOpen and close < pdH)
+
+inKZ = not useKZ or not na(time(timeframe.period, str.format("{0,number,00}00-{1,number,00}00", kzStart, kzEnd), "America/New_York"))
+
+etMin = hour(time, "America/New_York")*60 + minute(time, "America/New_York")
+inWin(ev) => etMin >= ev-preMin and etMin <= ev+postMin
+blackout = useNews and ( (nb0830 and inWin(8*60+30)) or (nb1000 and inWin(10*60)) or (isFomcDay and etMin >= 13*60+55 and etMin <= 14*60+45) )
+
+ph = ta.pivothigh(high, pivLen, pivLen)
+pl = ta.pivotlow(low,  pivLen, pivLen)
+var float lastPH = na
+var float lastPL = na
+if not na(ph)
+    lastPH := ph
+if not na(pl)
+    lastPL := pl
+
+rngHi = ta.highest(high, sweepLook)
+rngLo = ta.lowest(low,  sweepLook)
+fibMid = (rngHi + rngLo) / 2.0
+inDiscount = close < fibMid
+inPremium  = close > fibMid
+
+bullFVG = (low > high[2]) and ((low - high[2]) >= fvgAtrMin * atr)
+bearFVG = (high < low[2]) and ((low[2] - high) >= fvgAtrMin * atr)
+
+prevHigh = ta.highest(high[1], sweepLook)
+prevLow  = ta.lowest(low[1],  sweepLook)
+sweptHi = high > prevHigh and close < prevHigh
+sweptLo = low  < prevLow  and close > prevLow
+
+mssUpEvent   = not na(lastPH) and close > lastPH and close[1] <= lastPH
+mssDownEvent = not na(lastPL) and close < lastPL and close[1] >= lastPL
+
+bsSweepLo = ta.barssince(sweptLo)
+bsSweepHi = ta.barssince(sweptHi)
+bsBullF   = ta.barssince(bullFVG)
+bsBearF   = ta.barssince(bearFVG)
+sweepLoRecent = bsSweepLo <= seqWin
+sweepHiRecent = bsSweepHi <= seqWin
+bullFvgRecent = bsBullF <= fvgWin
+bearFvgRecent = bsBearF <= fvgWin
+
+longSetup  = biasLong  and inKZ and not blackout and mssUpEvent   and (not useSweep or sweepLoRecent) and (not useFVG or bullFvgRecent) and (not useFib or inDiscount)
+shortSetup = biasShort and inKZ and not blackout and mssDownEvent and (not useSweep or sweepHiRecent) and (not useFVG or bearFvgRecent) and (not useFib or inPremium)
+
+var int   tradesToday = 0
+var int   consecL     = 0
+var bool  locked      = false
+var float dayStartEq  = strategy.equity
+var float weekStartEq = strategy.equity
+newDay  = ta.change(time("D")) != 0
+newWeek = ta.change(time("W")) != 0
+if newDay
+    tradesToday := 0
+    dayStartEq  := strategy.equity
+    locked      := false
+if newWeek
+    weekStartEq := strategy.equity
+
+riskPerTradeUsd = stopAtrMlt * atr * pointValue
+dayLossHit  = (dayStartEq  - strategy.equity) >= dailyLossR  * riskPerTradeUsd
+weekLossHit = (weekStartEq - strategy.equity) >= weeklyLossR * riskPerTradeUsd
+canTrade = tradesToday < maxTradesD and not dayLossHit and not weekLossHit and not locked
+
+var int lastClosed = 0
+if strategy.closedtrades > lastClosed
+    if strategy.closedtrades.profit(strategy.closedtrades - 1) < 0
+        consecL += 1
+    else
+        consecL := 0
+    if consecL >= maxConsecL
+        locked := true
+    lastClosed := strategy.closedtrades
+
+calcQty(stopDist) =>
+    rawRisk = stopDist * pointValue
+    q = rawRisk > 0 ? math.floor((strategy.equity * riskPct) / rawRisk) : 0
+    math.max(1, math.min(maxContracts, q))
+
+// persistent trade levels for exit management
+var float ePrice = na
+var float eStop  = na
+var float eRisk  = na
+
+if longSetup and canTrade and strategy.position_size == 0
+    stopPx = math.min(low, low[1]) - stopAtrMlt * atr
+    risk   = close - stopPx
+    if risk > 0
+        qty = calcQty(risk)
+        ePrice := close
+        eStop  := stopPx
+        eRisk  := risk
+        strategy.entry("L", strategy.long, qty=qty)
+        tradesToday += 1
+        alert('{"action":"entry","side":"long","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"sl":' + str.tostring(stopPx) + ',"tp":' + str.tostring(close + rr*risk) + ',"qty":' + str.tostring(qty) + '}', alert.freq_once_per_bar_close)
+
+if shortSetup and canTrade and strategy.position_size == 0
+    stopPx = math.max(high, high[1]) + stopAtrMlt * atr
+    risk   = stopPx - close
+    if risk > 0
+        qty = calcQty(risk)
+        ePrice := close
+        eStop  := stopPx
+        eRisk  := risk
+        strategy.entry("S", strategy.short, qty=qty)
+        tradesToday += 1
+        alert('{"action":"entry","side":"short","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"sl":' + str.tostring(stopPx) + ',"tp":' + str.tostring(close - rr*risk) + ',"qty":' + str.tostring(qty) + '}', alert.freq_once_per_bar_close)
+
+// ---- exit management (partial + breakeven) ----
+if strategy.position_size != 0 and not na(ePrice)
+    longPos = strategy.position_size > 0
+    t1 = longPos ? ePrice + partialAtR*eRisk : ePrice - partialAtR*eRisk
+    t2 = longPos ? ePrice + rr*eRisk         : ePrice - rr*eRisk
+    beHit = longPos ? (high >= t1) : (low <= t1)
+    runStop = (usePartial and beHit) ? ePrice : eStop
+    if usePartial
+        strategy.exit("TP1", qty_percent=partialPct, stop=eStop, limit=t1)
+        strategy.exit("RUN", stop=runStop, limit=t2)
+    else
+        strategy.exit("X", stop=eStop, limit=t2)
+
+plotshape(longSetup,  title="Long",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.tiny)
+plotshape(shortSetup, title="Short", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.tiny)
+bgcolor(inKZ ? color.new(color.blue, 92) : na, title="Killzone")
+bgcolor(blackout ? color.new(color.orange, 80) : na, title="News blackout")

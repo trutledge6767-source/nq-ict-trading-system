@@ -1,0 +1,27 @@
+{
+  "version": "v0.2",
+  "tf": "5m",
+  "bars": 302,
+  "calendar_coverage_hours": 25,
+  "date": "2026-06-17",
+  "data_source": "TradingView MCP data_get_ohlcv (full available 5m depth = 302 bars)",
+  "VERDICT": "SAMPLE TOO SMALL FOR VALIDATION (n_trades 0-3). Results below are NOT statistically meaningful — recorded only to confirm engine correctness and relative filter behavior.",
+  "ablation": [
+    {"config":"baseline(all on)","trades":0},
+    {"config":"no-bias","trades":0},
+    {"config":"no-fib","trades":1,"win":0,"PF":0,"expR":-1.01},
+    {"config":"no-sweep","trades":0},
+    {"config":"no-fvg","trades":0},
+    {"config":"no-killzone","trades":0},
+    {"config":"raw-MSS-only","trades":3,"win":33.33,"PF":0.99,"expR":-0.01,"maxDD":-2.02},
+    {"config":"no-KZ+no-bias","trades":0},
+    {"config":"rr1.5","trades":0},
+    {"config":"rr3.0","trades":0},
+    {"config":"sweep+fvg only(noKZ)","trades":2,"win":50,"PF":1.97,"expR":0.49,"maxDD":-1.01}
+  ],
+  "observations_unvalidated": [
+    "Full ICT filter stack (killzone+bias+fib+sweep+fvg) is so restrictive it yields 0 trades on 1 day of 5m. Under-trading, not over-trading, is the failure mode at this sample size.",
+    "Killzone (NY AM 7-11 ET) likely excludes most of the 25h window -> primary cause of 0 trades.",
+    "Cannot rank filters or accept/reject H1-H4 until sample is 100x larger."
+  ]
+}

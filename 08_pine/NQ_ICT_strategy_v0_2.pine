@@ -1,0 +1,137 @@
+//@version=6
+// =====================================================================
+// NQ ICT A+ Strategy — v0.2
+// Change vs v0.1: SEQUENCE model (sweep -> MSS event -> recent FVG),
+// not all-conditions-on-one-bar. Generates realistic trade frequency.
+// NON-REPAINTING: confirmed pivots, closed-bar FVGs, event detection on
+// close, recency via ta.barssince, HTF lookahead_off, orders on close.
+// =====================================================================
+strategy("NQ ICT A+ v0.2", overlay=true, pyramiding=0,
+     default_qty_type=strategy.fixed, default_qty_value=1,
+     initial_capital=50000, commission_type=strategy.commission.cash_per_contract,
+     commission_value=2.10, slippage=2, calc_on_every_tick=false,
+     process_orders_on_close=true)
+
+// ---------------- Inputs ----------------
+grpKZ   = "Session / Killzone (ET)"
+useKZ   = input.bool(true,  "Use NY AM killzone filter", group=grpKZ)
+kzStart = input.int(7,  "KZ start hour (ET)", minval=0, maxval=23, group=grpKZ)
+kzEnd   = input.int(11, "KZ end hour (ET)",   minval=0, maxval=23, group=grpKZ)
+
+grpStr  = "Structure / Pivots"
+pivLen  = input.int(5,  "Pivot lookback (L=R bars)", minval=2, group=grpStr)
+seqWin  = input.int(12, "Sequence window (bars)",    minval=2, group=grpStr)
+
+grpFVG  = "FVG"
+useFVG     = input.bool(true,  "Require recent FVG", group=grpFVG)
+fvgAtrMin  = input.float(0.20, "Min FVG size (xATR)", step=0.05, group=grpFVG)
+fvgWin     = input.int(4, "FVG recency (bars)", minval=1, group=grpFVG)
+
+grpSweep = "Liquidity Sweep"
+useSweep   = input.bool(true, "Require recent liquidity sweep", group=grpSweep)
+sweepLook  = input.int(20, "Sweep lookback bars", minval=5, group=grpSweep)
+
+grpFib  = "Premium/Discount"
+useFib  = input.bool(true, "Discount longs / premium shorts only", group=grpFib)
+
+grpBias = "HTF Bias"
+useBias = input.bool(true, "Use daily bias filter", group=grpBias)
+
+grpRisk = "Risk"
+atrLen     = input.int(14, "ATR length", group=grpRisk)
+stopAtrMlt = input.float(1.5, "Stop buffer (xATR)", step=0.1, group=grpRisk)
+rr         = input.float(2.0, "Reward:Risk target", step=0.25, group=grpRisk)
+maxTradesD = input.int(3, "Max trades per day", minval=1, group=grpRisk)
+dailyLossR = input.float(2.0, "Daily loss limit (R)", step=0.5, group=grpRisk)
+
+// ---------------- Core series ----------------
+atr = ta.atr(atrLen)
+
+// HTF daily bias (non-repaint)
+dOpen = request.security(syminfo.tickerid, "D", open,  lookahead=barmerge.lookahead_off)
+pdH   = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
+pdL   = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_off)
+biasLong  = not useBias or (close > dOpen and close > pdL)
+biasShort = not useBias or (close < dOpen and close < pdH)
+
+// Killzone (ET)
+inKZ = not useKZ or not na(time(timeframe.period,
+     str.format("{0,number,00}00-{1,number,00}00", kzStart, kzEnd), "America/New_York"))
+
+// Confirmed pivots (lag pivLen bars => non-repaint)
+ph = ta.pivothigh(high, pivLen, pivLen)
+pl = ta.pivotlow(low,  pivLen, pivLen)
+var float lastPH = na
+var float lastPL = na
+if not na(ph)
+    lastPH := ph
+if not na(pl)
+    lastPL := pl
+
+// Dealing range + fib
+rngHi = ta.highest(high, sweepLook)
+rngLo = ta.lowest(low,  sweepLook)
+fibMid = (rngHi + rngLo) / 2.0
+inDiscount = close < fibMid
+inPremium  = close > fibMid
+
+// FVG events (3-bar, closed)
+bullFVG = (low > high[2]) and ((low - high[2]) >= fvgAtrMin * atr)
+bearFVG = (high < low[2]) and ((low[2] - high) >= fvgAtrMin * atr)
+
+// Liquidity sweep events (close back inside)
+prevHigh = ta.highest(high[1], sweepLook)
+prevLow  = ta.lowest(low[1],  sweepLook)
+sweptHi = high > prevHigh and close < prevHigh
+sweptLo = low  < prevLow  and close > prevLow
+
+// MSS displacement EVENTS (cross of last confirmed swing)
+mssUpEvent   = not na(lastPH) and close > lastPH and close[1] <= lastPH
+mssDownEvent = not na(lastPL) and close < lastPL and close[1] >= lastPL
+
+// Recency (hoisted to avoid conditional-call warnings; non-repaint)
+bsSweepLo = ta.barssince(sweptLo)
+bsSweepHi = ta.barssince(sweptHi)
+bsBullF   = ta.barssince(bullFVG)
+bsBearF   = ta.barssince(bearFVG)
+sweepLoRecent = bsSweepLo <= seqWin
+sweepHiRecent = bsSweepHi <= seqWin
+bullFvgRecent = bsBullF <= fvgWin
+bearFvgRecent = bsBearF <= fvgWin
+
+// ---------------- Entry logic (ICT 2022 sequence) ----------------
+longSetup  = biasLong  and inKZ and mssUpEvent   and (not useSweep or sweepLoRecent) and (not useFVG or bullFvgRecent) and (not useFib or inDiscount)
+shortSetup = biasShort and inKZ and mssDownEvent and (not useSweep or sweepHiRecent) and (not useFVG or bearFvgRecent) and (not useFib or inPremium)
+
+// ---------------- Daily risk governor ----------------
+var int   tradesToday = 0
+var float dayStartEq  = strategy.equity
+newDay = ta.change(time("D")) != 0
+if newDay
+    tradesToday := 0
+    dayStartEq  := strategy.equity
+riskPerTrade = stopAtrMlt * atr * 20.0   // $20/pt NQ
+dayLossHit = (dayStartEq - strategy.equity) >= dailyLossR * riskPerTrade
+canTrade = tradesToday < maxTradesD and not dayLossHit
+
+// ---------------- Orders ----------------
+if longSetup and canTrade and strategy.position_size == 0
+    stopPx = math.min(low, low[1]) - stopAtrMlt * atr
+    risk   = close - stopPx
+    if risk > 0
+        strategy.entry("L", strategy.long)
+        strategy.exit("Lx", "L", stop=stopPx, limit=close + rr * risk)
+        tradesToday += 1
+
+if shortSetup and canTrade and strategy.position_size == 0
+    stopPx = math.max(high, high[1]) + stopAtrMlt * atr
+    risk   = stopPx - close
+    if risk > 0
+        strategy.entry("S", strategy.short)
+        strategy.exit("Sx", "S", stop=stopPx, limit=close - rr * risk)
+        tradesToday += 1
+
+// ---------------- Visuals ----------------
+plotshape(longSetup,  title="Long",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.tiny)
+plotshape(shortSetup, title="Short", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.tiny)
+bgcolor(inKZ ? color.new(color.blue, 92) : na, title="Killzone")

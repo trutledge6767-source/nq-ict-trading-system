@@ -1,0 +1,127 @@
+//@version=6
+// =====================================================================
+// NQ ICT A+ Strategy — v0.1 (skeleton baseline)
+// Core concepts: HTF daily bias, NY AM killzone, ATR-normalized FVG,
+// liquidity sweep, MSS displacement, premium/discount fib filter.
+// Design rule: NON-REPAINTING — confirmed pivots, closed-bar FVGs,
+// HTF via lookahead_off, entries evaluated on bar close.
+// =====================================================================
+strategy("NQ ICT A+ v0.1", overlay=true, pyramiding=0,
+     default_qty_type=strategy.fixed, default_qty_value=1,
+     initial_capital=50000, commission_type=strategy.commission.cash_per_contract,
+     commission_value=2.10, slippage=2, calc_on_every_tick=false,
+     process_orders_on_close=true)
+
+// ---------------- Inputs ----------------
+grpKZ   = "Session / Killzone (ET)"
+useKZ   = input.bool(true,  "Use NY AM killzone filter", group=grpKZ)
+kzStart = input.int(7,  "KZ start hour (ET)", minval=0, maxval=23, group=grpKZ)
+kzEnd   = input.int(11, "KZ end hour (ET)",   minval=0, maxval=23, group=grpKZ)
+
+grpStr  = "Structure / Pivots"
+pivLen  = input.int(5, "Pivot lookback (L=R bars)", minval=2, group=grpStr)
+
+grpFVG  = "FVG"
+useFVG     = input.bool(true, "Require FVG entry", group=grpFVG)
+fvgAtrMin  = input.float(0.25, "Min FVG size (xATR)", step=0.05, group=grpFVG)
+
+grpSweep = "Liquidity Sweep"
+useSweep   = input.bool(true, "Require liquidity sweep", group=grpSweep)
+sweepLook  = input.int(20, "Sweep lookback bars", minval=5, group=grpSweep)
+
+grpFib  = "Premium/Discount"
+useFib  = input.bool(true, "Discount longs / premium shorts only", group=grpFib)
+
+grpBias = "HTF Bias"
+useBias = input.bool(true, "Use daily bias filter", group=grpBias)
+
+grpRisk = "Risk"
+atrLen     = input.int(14, "ATR length", group=grpRisk)
+stopAtrMlt = input.float(1.5, "Stop = sweep extreme buffer (xATR)", step=0.1, group=grpRisk)
+rr         = input.float(2.0, "Reward:Risk target", step=0.25, group=grpRisk)
+maxTradesD = input.int(3, "Max trades per day", minval=1, group=grpRisk)
+dailyLossR = input.float(2.0, "Daily loss limit (R)", step=0.5, group=grpRisk)
+
+// ---------------- Core series ----------------
+atr = ta.atr(atrLen)
+
+// HTF daily bias (non-repaint: prior completed day via [1], lookahead_off)
+dOpen = request.security(syminfo.tickerid, "D", open,  lookahead=barmerge.lookahead_off)
+pdH   = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
+pdL   = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_off)
+biasLong  = not useBias or (close > dOpen and close > pdL)
+biasShort = not useBias or (close < dOpen and close < pdH)
+
+// Killzone (ET). time(timeframe, session, tz)
+inKZ = not useKZ or not na(time(timeframe.period,
+     str.format("{0,number,00}00-{1,number,00}00", kzStart, kzEnd), "America/New_York"))
+
+// Confirmed pivots (lag by pivLen bars => non-repaint)
+ph = ta.pivothigh(high, pivLen, pivLen)
+pl = ta.pivotlow(low,  pivLen, pivLen)
+var float lastPH = na
+var float lastPL = na
+if not na(ph)
+    lastPH := ph
+if not na(pl)
+    lastPL := pl
+
+// Dealing range + fib (uses confirmed swings only)
+rngHi = ta.highest(high, sweepLook)
+rngLo = ta.lowest(low, sweepLook)
+fibMid = (rngHi + rngLo) / 2.0
+inDiscount = close < fibMid
+inPremium  = close > fibMid
+
+// FVG (3-bar, closed). Bull gap: low[0] > high[2]; Bear gap: high[0] < low[2]
+bullFVG = (low > high[2]) and ((low - high[2]) >= fvgAtrMin * atr)
+bearFVG = (high < low[2]) and ((low[2] - high) >= fvgAtrMin * atr)
+
+// Liquidity sweep on close: wick takes recent extreme then closes back inside
+prevHigh = ta.highest(high[1], sweepLook)
+prevLow  = ta.lowest(low[1],  sweepLook)
+sweptHi = high > prevHigh and close < prevHigh
+sweptLo = low  < prevLow  and close > prevLow
+
+// MSS: displacement close through last confirmed swing
+mssUp   = not na(lastPH) and close > lastPH
+mssDown = not na(lastPL) and close < lastPL
+
+// ---------------- Entry logic ----------------
+longSetup = biasLong and inKZ and (not useFVG or bullFVG) and (not useSweep or sweptLo)
+     and mssUp and (not useFib or inDiscount)
+shortSetup = biasShort and inKZ and (not useFVG or bearFVG) and (not useSweep or sweptHi)
+     and mssDown and (not useFib or inPremium)
+
+// ---------------- Daily risk governor ----------------
+var int   tradesToday = 0
+var float dayStartEq  = strategy.equity
+newDay = ta.change(time("D")) != 0
+if newDay
+    tradesToday := 0
+    dayStartEq  := strategy.equity
+riskPerTrade = stopAtrMlt * atr * 20.0   // $20/pt NQ
+dayLossHit = (dayStartEq - strategy.equity) >= dailyLossR * riskPerTrade
+canTrade = tradesToday < maxTradesD and not dayLossHit
+
+// ---------------- Order management ----------------
+if longSetup and canTrade and strategy.position_size == 0
+    stopPx = low - stopAtrMlt * atr
+    risk   = close - stopPx
+    tgtPx  = close + rr * risk
+    strategy.entry("L", strategy.long)
+    strategy.exit("Lx", "L", stop=stopPx, limit=tgtPx)
+    tradesToday += 1
+
+if shortSetup and canTrade and strategy.position_size == 0
+    stopPx = high + stopAtrMlt * atr
+    risk   = stopPx - close
+    tgtPx  = close - rr * risk
+    strategy.entry("S", strategy.short)
+    strategy.exit("Sx", "S", stop=stopPx, limit=tgtPx)
+    tradesToday += 1
+
+// ---------------- Visuals ----------------
+plotshape(longSetup,  title="Long",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.tiny)
+plotshape(shortSetup, title="Short", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.tiny)
+bgcolor(inKZ ? color.new(color.blue, 92) : na, title="Killzone")

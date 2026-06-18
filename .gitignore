@@ -1,0 +1,18 @@
+# Large / regenerable data (kept out of git)
+# The 45MB 1m file is regenerable: csv_to_data.js <csv> NQ_1m_full.json --tf 1 --tz 0
+04_backtests/data/NQ_1m_full.json
+# Raw broker/exchange CSV exports (large, user-private)
+*.csv
+
+# Local agent / editor settings
+.claude/
+_state/*.tmp
+
+# OS / misc
+Thumbs.db
+desktop.ini
+*.log
+node_modules/
+
+# NOTE: NQ_5m_full.json (9MB, the validation dataset) IS committed so the repo is
+# self-contained and the walk-forward results are reproducible out of the box.
