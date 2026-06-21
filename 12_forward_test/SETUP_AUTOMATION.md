@@ -55,3 +55,20 @@ route the webhook to either (A) the logger — to validate the edge, or (B) an e
 - For futures, use **MNQ** so the per-R sizing is precise; 1 full NQ is too coarse for these account sizes.
 - Run the two strategies as the validated blend (P5 + ~0.7× reversion). Flat overnight; limit orders on the reversion sleeve are mandatory.
 - This validates forward performance; alpha decay is the #1 risk — watch live expR vs the +0.3–0.7R (P5) / ~+0.1R (reversion) baselines.
+
+## Permanent URL (so you set the alert webhooks ONCE)
+Quick tunnels change URL on restart. Two ways to get a stable URL (each needs a one-time account login you must do):
+
+**Option 1 — Cloudflare named tunnel (needs a domain on your free Cloudflare account):**
+```
+powershell -ExecutionPolicy Bypass -File setup_named_tunnel.ps1 -Hostname nqbot.yourdomain.com
+```
+Does login (browser) + tunnel create + DNS route + config. Then double-click **run_named_tunnel.bat** anytime.
+Webhooks: `https://nqbot.yourdomain.com/p5` and `/rev` — never change.
+
+**Option 2 — ngrok free static domain (NO domain needed; easiest):**
+1. Free account at ngrok.com → copy your **authtoken**, and Dashboard → Domains → create a free static domain (e.g. `nq-bot.ngrok-free.app`).
+2. `powershell -ExecutionPolicy Bypass -File setup_ngrok.ps1 -AuthToken <token> -Domain nq-bot.ngrok-free.app`
+3. Double-click **start_forward_test_stable.bat** anytime. Webhooks: `https://nq-bot.ngrok-free.app/p5` and `/rev` — never change.
+
+Both cloudflared and ngrok are already installed on this machine.
