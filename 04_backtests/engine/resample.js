@@ -20,18 +20,18 @@ function resample(data, minutes){
   const N=minutes; const sec=N*60;
   const src=data.bars;
   if(!src || !src.length) return {tf:String(N), tz_offset_hours:data.tz_offset_hours, bars:[]};
-  const out=[]; let curKey=null, o,h,l,c,bt;
+  const out=[]; let curKey=null, o,h,l,c,bt,vol;
   for(const b of src){
-    const [t,bo,bh,bl,bc]=b;
+    const [t,bo,bh,bl,bc]=b; const bv=b.length>5?(+b[5]||0):0;
     const key=Math.floor(t/sec);                 // UTC-aligned bucket
     if(key!==curKey){
-      if(curKey!==null) out.push([bt,o,h,l,c]);
-      curKey=key; bt=key*sec; o=bo; h=bh; l=bl; c=bc;
+      if(curKey!==null) out.push([bt,o,h,l,c,vol]);
+      curKey=key; bt=key*sec; o=bo; h=bh; l=bl; c=bc; vol=bv;
     } else {
-      if(bh>h) h=bh; if(bl<l) l=bl; c=bc;
+      if(bh>h) h=bh; if(bl<l) l=bl; c=bc; vol+=bv;
     }
   }
-  if(curKey!==null) out.push([bt,o,h,l,c]);
+  if(curKey!==null) out.push([bt,o,h,l,c,vol]);
   return {tf:String(N), tz_offset_hours:data.tz_offset_hours,
     note:'resampled to '+N+'m from 1m source', bars:out};
 }

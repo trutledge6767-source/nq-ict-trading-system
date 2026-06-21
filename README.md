@@ -8,17 +8,19 @@ autonomous research loop. It trades only objectively-defined A+ setups and is op
 > Nothing is assumed because it's "a popular ICT concept" — concepts were coded, tested, and kept or
 > rejected on the data.
 
-## Headline result (validated on real NQ, 2022–2025, 210k 5m bars)
-The original **at-breakout** entry had **no edge** (3 trades in 3 years; best variant 25% funded-pass).
-Backtesting revealed why — and the fix (canonical ICT **retracement entry into the displacement FVG**)
-produced the project's first validated edge:
+## Headline result (revalidated on real NQ, 2019–2026, 2.44M 1m bars)
+> **UPDATE (2026-06-18):** Re-tested on 7 years of real data, the **ICT retracement strategy failed
+> walk-forward (OVERFIT/FAIL, OOS −0.09R)** — its earlier "85% / ROBUST" was a small-window artifact.
+> A from-scratch rebuild found the real, robust edge. See **`11_deliverables/FINAL_STRATEGY_REPORT.md`**
+> (full arc) and **`01_research/FUNDED_SPEED_RESEARCH.md`** (iteration log).
 
-| Configuration | Trades (3yr) | Win% | PF | Expectancy | MaxDD | Walk-forward | Monte Carlo funded-pass |
-|---|---|---|---|---|---|---|---|
-| At-breakout (rejected) | 3 | – | ~1.0 | ~0 | – | OVERFIT/FAIL | 25% (FRAGILE) |
-| **Retracement + full ICT + partial/BE** | **141** | **64%** | **1.82** | **+0.30R** | **−4.8R** | **ROBUST** (OOS +0.47R, degr 0.082) | **85% (STRONG)** |
+| Strategy | Trades (7yr) | Win% | PF | Expectancy | +years | Verdict |
+|---|---|---|---|---|---|---|
+| ICT retracement (retired) | 261 | 57% | 1.31 | +0.13R | – | **OVERFIT/FAIL (OOS −0.09R)** |
+| **P5 — prior-day H/L breakout** | **1519** | 20% | 1.4 | **+0.33R** | **8/8** | **ROBUST (OOS +0.21R), slippage-insensitive** |
+| + Mean-reversion sleeve (limit entries) | — | — | — | −0.22 corr w/ P5 | 8/8 | **blend Sharpe 1.66→2.13; OOS-verified** |
 
-See `06_validation/VALIDATION_v0_6_RETRACEMENT.md` for the full write-up and honest caveats.
+Deployable Pine: `08_pine/NQ_PDHL_breakout_v1_0.pine` (core) + `08_pine/NQ_MeanReversion_v1_0.pine` (diversifier).
 
 ## What's inside
 - **Pine v6 deployment** (`08_pine/`): strategy (killzone + daily bias + liquidity sweep → MSS → FVG

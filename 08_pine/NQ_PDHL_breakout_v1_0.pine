@@ -1,0 +1,180 @@
+//@version=6
+// =====================================================================
+// NQ Prior-Day High/Low Breakout — "P5" v1.0
+// The data-validated successor to the (overfit) ICT stack. Built from the
+// 7-year (2019-2026) primitive scan + hardening:
+//   * Edge:    break of PRIOR-DAY RTH high/low, in the RTH morning window.
+//   * Entry:   bar CLOSE beyond the prior-day level (one trade/day).
+//   * Stop:    1xATR (validated 0.75-1.0). Risk-multiple R = stop distance.
+//   * Exit:    HOLD TO RTH CLOSE, let the runner run (targets/partials made
+//              funded survivability WORSE — they amputate the fat tail that
+//              IS the edge). Flat at the cash close (no overnight).
+//   * Funded:  EVAL-OPTIMIZED defaults (day-level sim, 50k unlimited-time firm):
+//              0.75xATR stop + ~$50 risk/R (=~1 MNQ micro) => ~93% eval PASS,
+//              7% ruin. Sizing is the master lever ($100/R drops to ~74%).
+//              Use a NO-TIME-LIMIT firm (Topstep/Apex) — P5 grinds ~5-6 months.
+//              PAYOUT phase (30% consistency rule): widen stop to 1.0xATR, keep
+//              size small, bank several green days before withdrawing (don't
+//              cap runners — that kills the edge; don't add P3 — it dilutes).
+//              SIZE SMALL: 1 full NQ contract is far too large for a $2500
+//              trailing-DD account — trade MNQ (set "$ per point" = 2).
+// Robustness: positive in 8/8 calendar years; OOS 2024-26 stayed +0.21R.
+// NON-REPAINTING: prior-day level is fixed at the RTH open; all signals use
+// closed-bar values; prior-day H/L is tracked intraday (no request.security).
+// CRITICAL: the edge lives in the top ~5% of trades (big runners). Take EVERY
+// signal mechanically — skipping runners or a tight loss-lockout kills it.
+// Use on an intraday chart (validated on 5m NQ/MNQ).
+// =====================================================================
+strategy("NQ Prior-Day H/L Breakout (P5) v1.0", overlay=true, pyramiding=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=50000,
+     commission_type=strategy.commission.cash_per_contract, commission_value=2.10,
+     slippage=2, calc_on_every_tick=false, process_orders_on_close=true)
+
+// ---------------- Inputs ----------------
+grpS = "Session (ET) / Entry window"
+rthSess = input.session("0930-1600", "RTH session (defines prior-day H/L + trading hours)", group=grpS)
+cutoffH = input.int(12, "No NEW entries after hour (ET)", minval=0, maxval=16, group=grpS)
+cutoffM = input.int(0,  "...and minute", minval=0, maxval=59, group=grpS)
+
+grpSig = "Signal"
+trigClose = input.bool(true, "Trigger on bar CLOSE beyond level (else intrabar touch)", group=grpSig)
+
+grpR = "Risk / Sizing"
+atrLen     = input.int(14, "ATR length", group=grpR)
+stopAtrMlt = input.float(0.75, "Stop distance (xATR)  [eval:0.75, payout:1.0]", step=0.25, minval=0.25, group=grpR)
+useTgt     = input.bool(false, "Use fixed target (else hold to RTH close)  [validated OFF]", group=grpR)
+rr         = input.float(3.0, "Target R (only if enabled)", step=0.5, group=grpR)
+riskPct    = input.float(0.10, "Risk % of equity / trade  [~$50/R on 50k => ~93% eval pass]", step=0.05, group=grpR) / 100.0
+pointValue = input.float(20.0, "$ per point  (NQ=20, MNQ=2 — use MNQ for funded)", group=grpR)
+maxContracts = input.int(10, "Max contracts cap", minval=1, group=grpR)
+
+grpG = "Risk governor (catastrophe brakes — set wide; P5 needs every signal)"
+maxTradesD  = input.int(1, "Max trades per day", minval=1, group=grpG)
+dailyLossR  = input.float(2.0, "Daily loss limit (R)", step=0.5, group=grpG)
+weeklyLossR = input.float(6.0, "Weekly loss limit (R)", step=0.5, group=grpG)
+useLockout  = input.bool(false, "Enable consecutive-loss lockout (reduces edge!)", group=grpG)
+maxConsecL  = input.int(12, "Consecutive-loss lockout count", minval=1, group=grpG)
+
+// ---------------- Session / time ----------------
+inRTH  = not na(time(timeframe.period, rthSess, "America/New_York"))
+etMin  = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+tfMin  = timeframe.in_seconds(timeframe.period) / 60
+cutoff = cutoffH * 60 + cutoffM
+rthEndMin  = 16 * 60
+lastRthBar = inRTH and (etMin + tfMin >= rthEndMin)     // bar whose END is the RTH close
+newRTH     = inRTH and not inRTH[1]                     // first RTH bar of the day
+
+// ---------------- Prior-day RTH high/low (intraday, non-repainting) ----------------
+var float curHi = na
+var float curLo = na
+var float pdHi  = na
+var float pdLo  = na
+if newRTH
+    pdHi := curHi                                       // freeze yesterday's completed RTH range
+    pdLo := curLo
+    curHi := high
+    curLo := low
+else if inRTH
+    curHi := na(curHi) ? high : math.max(curHi, high)
+    curLo := na(curLo) ? low  : math.min(curLo, low)
+
+atr = ta.atr(atrLen)
+
+// ---------------- Risk-governor state ----------------
+var int   tradesToday = 0
+var bool  tradedToday = false
+var bool  locked      = false
+var float dayStartEq  = strategy.equity
+var float weekStartEq = strategy.equity
+newWeek = ta.change(time("W")) != 0
+if newRTH
+    tradesToday := 0
+    tradedToday := false
+    dayStartEq  := strategy.equity
+    locked      := false
+if newWeek
+    weekStartEq := strategy.equity
+
+riskUsdPerR = stopAtrMlt * atr * pointValue
+dayLossHit  = (dayStartEq  - strategy.equity) >= dailyLossR  * riskUsdPerR
+weekLossHit = (weekStartEq - strategy.equity) >= weeklyLossR * riskUsdPerR
+
+var int lastClosed = 0
+var int consecL    = 0
+if strategy.closedtrades > lastClosed
+    consecL := strategy.closedtrades.profit(strategy.closedtrades - 1) < 0 ? consecL + 1 : 0
+    if useLockout and consecL >= maxConsecL
+        locked := true
+    lastClosed := strategy.closedtrades
+
+canTrade = inRTH and etMin < cutoff and not lastRthBar and not tradedToday and strategy.position_size == 0 and not na(pdHi) and not na(pdLo) and tradesToday < maxTradesD and not dayLossHit and not weekLossHit and not locked
+
+// ---------------- Signals ----------------
+upBreak = trigClose ? close > pdHi : high > pdHi
+dnBreak = trigClose ? close < pdLo : low  < pdLo
+longSig  = canTrade and upBreak
+shortSig = canTrade and dnBreak and not upBreak         // long takes priority if both on same bar
+
+calcQty(stopDist) =>
+    rawRisk = stopDist * pointValue
+    q = rawRisk > 0 ? math.floor((strategy.equity * riskPct) / rawRisk) : 0
+    math.max(1, math.min(maxContracts, q))
+
+var float ePrice = na
+var float eStop  = na
+var float eRisk  = na
+
+if longSig
+    risk = stopAtrMlt * atr
+    if risk > 0
+        qty = calcQty(risk)
+        strategy.entry("L", strategy.long, qty=qty)
+        ePrice := close
+        eStop  := close - risk
+        eRisk  := risk
+        tradesToday += 1
+        tradedToday := true
+        alert('{"action":"entry","side":"long","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"sl":' + str.tostring(close - risk) + ',"tp":' + str.tostring(useTgt ? close + rr*risk : 0) + ',"qty":' + str.tostring(qty) + '}', alert.freq_once_per_bar_close)
+else if shortSig
+    risk = stopAtrMlt * atr
+    if risk > 0
+        qty = calcQty(risk)
+        strategy.entry("S", strategy.short, qty=qty)
+        ePrice := close
+        eStop  := close + risk
+        eRisk  := risk
+        tradesToday += 1
+        tradedToday := true
+        alert('{"action":"entry","side":"short","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"sl":' + str.tostring(close + risk) + ',"tp":' + str.tostring(useTgt ? close - rr*risk : 0) + ',"qty":' + str.tostring(qty) + '}', alert.freq_once_per_bar_close)
+
+// ---------------- Exits: protective stop + hold-to-close (no overnight) ----------------
+if strategy.position_size > 0 and not na(eStop)
+    if useTgt
+        strategy.exit("xL", from_entry="L", stop=eStop, limit=ePrice + rr*eRisk)
+    else
+        strategy.exit("xL", from_entry="L", stop=eStop)
+if strategy.position_size < 0 and not na(eStop)
+    if useTgt
+        strategy.exit("xS", from_entry="S", stop=eStop, limit=ePrice - rr*eRisk)
+    else
+        strategy.exit("xS", from_entry="S", stop=eStop)
+
+if lastRthBar and strategy.position_size != 0
+    strategy.close_all(comment="EOD flat")
+
+// ---------------- Exit/close webhook alerts (entry alerts emitted above) ----------------
+var float prevPosSize = 0.0
+sz = strategy.position_size
+if math.abs(sz) < math.abs(prevPosSize)
+    act = sz == 0 ? "close" : "reduce"
+    sideStr = prevPosSize > 0 ? "long" : "short"
+    alert('{"action":"' + act + '","side":"' + sideStr + '","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"remaining_qty":' + str.tostring(math.abs(sz)) + '}', alert.freq_once_per_bar_close)
+prevPosSize := sz
+
+// ---------------- Plots ----------------
+plot(inRTH ? pdHi : na, "Prior-day High", color=color.new(color.teal, 0),   style=plot.style_linebr, linewidth=2)
+plot(inRTH ? pdLo : na, "Prior-day Low",  color=color.new(color.maroon, 0), style=plot.style_linebr, linewidth=2)
+plotshape(longSig,  title="Long break",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.tiny)
+plotshape(shortSig, title="Short break", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.tiny)
+bgcolor(inRTH ? color.new(color.blue, 94) : na, title="RTH")
+bgcolor(inRTH and etMin >= cutoff ? color.new(color.gray, 90) : na, title="Past entry cutoff")

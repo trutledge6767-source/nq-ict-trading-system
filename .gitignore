@@ -1,6 +1,13 @@
 # Large / regenerable data (kept out of git)
 # The 45MB 1m file is regenerable: csv_to_data.js <csv> NQ_1m_full.json --tf 1 --tz 0
 04_backtests/data/NQ_1m_full.json
+# 7-year datasets (large, regenerable from NQ_1min_7y.csv via csv_to_data -> utc_to_et -> resample)
+04_backtests/data/NQ_1m_7y*.json
+04_backtests/data/NQ_5m_7y*.json
+# Forward-test runtime artifacts
+12_forward_test/state.json
+12_forward_test/events.csv
+12_forward_test/trades_*.csv
 # Raw broker/exchange CSV exports (large, user-private)
 *.csv
 

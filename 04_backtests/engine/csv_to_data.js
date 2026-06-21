@@ -46,9 +46,10 @@ function parseCSV(raw, opts){
   const head=lines[0].split(/[,;\t]/).map(norm);
   const find=names=>{ for(const n of names){ const i=head.indexOf(n); if(i>=0) return i; } return -1; };
   // time column: exact match first, else first header containing time/date/timestamp (e.g. "timestamp ET")
-  let iT=find(['time','date','datetime','timestamp','unixtime','date_time']);
-  if(iT<0) iT=head.findIndex(h=>/(timestamp|datetime|^time|^date|unixtime)/.test(h));
+  let iT=find(['time','date','datetime','timestamp','unixtime','date_time','tsevent','ts','tsrecv']);
+  if(iT<0) iT=head.findIndex(h=>/(timestamp|datetime|^time|^date|unixtime|^ts)/.test(h));
   const iO=find(['open','o']), iH=find(['high','h']), iL=find(['low','l']), iC=find(['close','c','last']);
+  const iV=find(['volume','vol','v']);                       // optional; kept as 6th element when present
   if([iT,iO,iH,iL,iC].some(x=>x<0)) throw new Error('missing required column(s). header='+JSON.stringify(head));
   const bars=[];
   for(let k=1;k<lines.length;k++){
@@ -56,7 +57,8 @@ function parseCSV(raw, opts){
     const t=parseTime(f[iT],tzcsv);
     const o=+f[iO],h=+f[iH],l=+f[iL],c=+f[iC];
     if([o,h,l,c].some(x=>!isFinite(x))) continue;
-    bars.push([t,o,h,l,c]);
+    const v=iV>=0?(+f[iV]||0):0;
+    bars.push([t,o,h,l,c,v]);
   }
   bars.sort((a,b)=>a[0]-b[0]);
   const dedup=[]; for(const b of bars){ if(dedup.length && dedup[dedup.length-1][0]===b[0]) dedup[dedup.length-1]=b; else dedup.push(b); }

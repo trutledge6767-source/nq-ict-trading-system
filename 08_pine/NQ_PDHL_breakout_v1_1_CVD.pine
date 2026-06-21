@@ -1,0 +1,159 @@
+//@version=6
+// =====================================================================
+// NQ Prior-Day High/Low Breakout + ORDER-FLOW (CVD) — v1.1
+// v1.0 (P5) + session Cumulative Volume Delta confirmation. Research
+// (01_research/FUNDED_SPEED_RESEARCH.md, OF-iter 1-2): requiring the breakout
+// to be backed by aligned net buying/selling (session CVD same sign as the
+// break) lifts per-trade expR +0.52->+0.67R, ann Sharpe 1.66->1.71, and CUTS
+// funded ruin 7.6%->4.9% / pass 92.4%->95.1% — while STAYING 8/8 positive years
+// (the only filter in the project that improved the edge without hurting robustness).
+//
+// CVD here = session close-location volume delta proxy (matches the backtest exactly,
+// uses only `volume`). OPTIONAL UPGRADE: swap to true ta.requestVolumeDelta() for tick
+// delta — but RE-VALIDATE first; the proxy is what was tested.
+// Core P5 unchanged: prior-day RTH H/L break, 1xATR stop (0.75 eval), hold-to-close,
+// flat overnight, funded sizing. NON-REPAINTING (closed-bar signals + prior-day level).
+// =====================================================================
+strategy("NQ PDHL Breakout + CVD v1.1", overlay=true, pyramiding=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=50000,
+     commission_type=strategy.commission.cash_per_contract, commission_value=2.10,
+     slippage=2, calc_on_every_tick=false, process_orders_on_close=true)
+
+grpS = "Session (ET) / Entry window"
+rthSess = input.session("0930-1600", "RTH session (defines prior-day H/L + hours)", group=grpS)
+cutoffH = input.int(12, "No NEW entries after hour (ET)", minval=0, maxval=16, group=grpS)
+cutoffM = input.int(0,  "...and minute", minval=0, maxval=59, group=grpS)
+
+grpOF = "Order flow (CVD confirmation)"
+useCVD = input.bool(true, "Require session CVD aligned with breakout", group=grpOF)
+
+grpSig = "Signal"
+trigClose = input.bool(true, "Trigger on bar CLOSE beyond level", group=grpSig)
+
+grpR = "Risk / Sizing"
+atrLen     = input.int(14, "ATR length", group=grpR)
+stopAtrMlt = input.float(0.75, "Stop distance (xATR) [eval:0.75, payout:1.0]", step=0.25, minval=0.25, group=grpR)
+useTgt     = input.bool(false, "Use fixed target (else hold to RTH close)", group=grpR)
+rr         = input.float(3.0, "Target R (only if enabled)", step=0.5, group=grpR)
+riskPct    = input.float(0.10, "Risk % equity / trade  [~$50/R on 50k]", step=0.05, group=grpR)/100.0
+pointValue = input.float(20.0, "$ per point (NQ=20, MNQ=2 — use MNQ for funded)", group=grpR)
+maxContracts = input.int(10, "Max contracts cap", minval=1, group=grpR)
+
+grpG = "Risk governor"
+maxTradesD  = input.int(1, "Max trades per day", minval=1, group=grpG)
+dailyLossR  = input.float(2.0, "Daily loss limit (R)", step=0.5, group=grpG)
+weeklyLossR = input.float(6.0, "Weekly loss limit (R)", step=0.5, group=grpG)
+
+// ---------- session / time ----------
+inRTH  = not na(time(timeframe.period, rthSess, "America/New_York"))
+etMin  = hour(time, "America/New_York")*60 + minute(time, "America/New_York")
+tfMin  = timeframe.in_seconds(timeframe.period)/60
+cutoff = cutoffH*60 + cutoffM
+lastRthBar = inRTH and (etMin + tfMin >= 16*60)
+newRTH     = inRTH and not inRTH[1]
+
+// ---------- prior-day RTH high/low (intraday, non-repainting) ----------
+var float curHi = na
+var float curLo = na
+var float pdHi  = na
+var float pdLo  = na
+if newRTH
+    pdHi := curHi
+    pdLo := curLo
+    curHi := high
+    curLo := low
+else if inRTH
+    curHi := na(curHi) ? high : math.max(curHi, high)
+    curLo := na(curLo) ? low  : math.min(curLo, low)
+
+atr = ta.atr(atrLen)
+
+// ---------- session CVD (close-location volume-delta proxy; matches backtest) ----------
+clv = high > low ? ((close-low)-(high-close))/(high-low) : 0.0
+barDelta = clv * volume
+var float cvd = 0.0
+if newRTH
+    cvd := barDelta
+else if inRTH
+    cvd := cvd + barDelta
+
+// ---------- governor ----------
+var int tradesToday = 0
+var bool tradedToday = false
+var float dayStartEq = strategy.equity
+var float weekStartEq = strategy.equity
+newWeek = ta.change(time("W")) != 0
+if newRTH
+    tradesToday := 0
+    tradedToday := false
+    dayStartEq := strategy.equity
+if newWeek
+    weekStartEq := strategy.equity
+riskUsdPerR = stopAtrMlt*atr*pointValue
+dayLossHit  = (dayStartEq  - strategy.equity) >= dailyLossR *riskUsdPerR
+weekLossHit = (weekStartEq - strategy.equity) >= weeklyLossR*riskUsdPerR
+canTrade = inRTH and etMin < cutoff and not lastRthBar and not tradedToday and strategy.position_size == 0 and not na(pdHi) and not na(pdLo) and tradesToday < maxTradesD and not dayLossHit and not weekLossHit
+
+// ---------- signals (+ CVD confirmation) ----------
+upBreak = trigClose ? close > pdHi : high > pdHi
+dnBreak = trigClose ? close < pdLo : low  < pdLo
+cvdLongOK  = not useCVD or cvd > 0      // net buying supports the up-break
+cvdShortOK = not useCVD or cvd < 0      // net selling supports the down-break
+longSig  = canTrade and upBreak and cvdLongOK
+shortSig = canTrade and dnBreak and not upBreak and cvdShortOK
+
+calcQty(stopDist) =>
+    rawRisk = stopDist*pointValue
+    q = rawRisk > 0 ? math.floor((strategy.equity*riskPct)/rawRisk) : 0
+    math.max(1, math.min(maxContracts, q))
+
+var float ePrice = na
+var float eStop  = na
+var float eRisk  = na
+if longSig
+    risk = stopAtrMlt*atr
+    if risk > 0
+        strategy.entry("L", strategy.long, qty=calcQty(risk))
+        ePrice := close
+        eStop  := close - risk
+        eRisk  := risk
+        tradesToday += 1
+        tradedToday := true
+        alert('{"action":"entry","side":"long","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"sl":' + str.tostring(close-risk) + ',"cvd":' + str.tostring(cvd) + '}', alert.freq_once_per_bar_close)
+else if shortSig
+    risk = stopAtrMlt*atr
+    if risk > 0
+        strategy.entry("S", strategy.short, qty=calcQty(risk))
+        ePrice := close
+        eStop  := close + risk
+        eRisk  := risk
+        tradesToday += 1
+        tradedToday := true
+        alert('{"action":"entry","side":"short","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"sl":' + str.tostring(close+risk) + ',"cvd":' + str.tostring(cvd) + '}', alert.freq_once_per_bar_close)
+
+if strategy.position_size > 0 and not na(eStop)
+    if useTgt
+        strategy.exit("xL", from_entry="L", stop=eStop, limit=ePrice + rr*eRisk)
+    else
+        strategy.exit("xL", from_entry="L", stop=eStop)
+if strategy.position_size < 0 and not na(eStop)
+    if useTgt
+        strategy.exit("xS", from_entry="S", stop=eStop, limit=ePrice - rr*eRisk)
+    else
+        strategy.exit("xS", from_entry="S", stop=eStop)
+
+if lastRthBar and strategy.position_size != 0
+    strategy.close_all(comment="EOD flat")
+
+var float prevPos = 0.0
+if math.abs(strategy.position_size) < math.abs(prevPos)
+    alert('{"action":"' + (strategy.position_size==0?"close":"reduce") + '","side":"' + (prevPos>0?"long":"short") + '","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + '}', alert.freq_once_per_bar_close)
+prevPos := strategy.position_size
+
+plot(inRTH ? pdHi : na, "Prior-day High", color=color.new(color.teal,0), style=plot.style_linebr, linewidth=2)
+plot(inRTH ? pdLo : na, "Prior-day Low",  color=color.new(color.maroon,0), style=plot.style_linebr, linewidth=2)
+hline(0, "CVD zero", color=color.new(color.gray,70))
+plot(inRTH ? cvd : na, "Session CVD", color=cvd>=0?color.teal:color.maroon, display=display.data_window)
+plotshape(longSig,  "Long",  shape.triangleup,   location.belowbar, color.lime, size=size.tiny)
+plotshape(shortSig, "Short", shape.triangledown, location.abovebar, color.red,  size=size.tiny)
+bgcolor(inRTH ? color.new(color.blue,94) : na)
