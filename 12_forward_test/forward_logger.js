@@ -71,8 +71,10 @@ const server=http.createServer((req,res)=>{
   const u=new URL(req.url,'http://x'); const strat=u.pathname.replace(/^\/+|\/+$/g,'')||'default';
   if(req.method==='GET'){
     if(strat==='status'||strat==='default'){
+      const now=Date.now();
+      const stale=Object.keys(state.open).filter(k=>state.open[k].time && (now-new Date(state.open[k].time).getTime())>6*3600*1000);
       res.writeHead(200,{'content-type':'application/json'});
-      return res.end(JSON.stringify({ok:true,port:PORT,open:state.open,events:fs.existsSync(EVENTS)?fs.readFileSync(EVENTS,'utf8').trim().split('\n').length-1:0},null,1));
+      return res.end(JSON.stringify({ok:true,port:PORT,open:state.open,stale_open:stale,events:fs.existsSync(EVENTS)?fs.readFileSync(EVENTS,'utf8').trim().split('\n').length-1:0},null,1));
     }
   }
   if(req.method!=='POST'){ res.writeHead(405); return res.end('POST only'); }
