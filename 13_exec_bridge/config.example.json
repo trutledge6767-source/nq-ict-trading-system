@@ -1,0 +1,12 @@
+{
+  "http_port": 8799,
+  "ib_host": "127.0.0.1",
+  "ib_port": 4002,
+  "ib_client_id": 7,
+  "dry_run": true,
+  "symbol": "MNQ",
+  "exchange": "CME",
+  "currency": "USD",
+  "default_qty": 1,
+  "account": ""
+}

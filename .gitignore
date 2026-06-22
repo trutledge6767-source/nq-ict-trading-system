@@ -8,6 +8,13 @@
 12_forward_test/state.json
 12_forward_test/events.csv
 12_forward_test/trades_*.csv
+12_forward_test/ngrok_domain.txt
+12_forward_test/auto_check_state.json
+12_forward_test/STATUS.txt
+# Execution-bridge runtime artifacts + local config (no secrets, but machine-specific)
+13_exec_bridge/config.json
+13_exec_bridge/orders.csv
+13_exec_bridge/__pycache__/
 # Raw broker/exchange CSV exports (large, user-private)
 *.csv
 
