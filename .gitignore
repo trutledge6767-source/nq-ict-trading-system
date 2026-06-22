@@ -11,6 +11,7 @@
 12_forward_test/ngrok_domain.txt
 12_forward_test/auto_check_state.json
 12_forward_test/STATUS.txt
+12_forward_test/reports/
 # Execution-bridge runtime artifacts + local config (no secrets, but machine-specific)
 13_exec_bridge/config.json
 13_exec_bridge/orders.csv
