@@ -28,13 +28,25 @@ console.log(`=== SURVIVAL-config model, ${from} -> ${to}, sized 1 MNQ ($2/pt) ==
 const byDay={};
 for(const t of wk){const usd=t.r*t.risk*PV;(byDay[t.day]=byDay[t.day]||[]).push({...t,usd});}
 let totUsd=0,totR=0,n=0;
-for(const day of Object.keys(byDay)){
-  let d$=0,dR=0;const rows=byDay[day];
-  for(const t of rows){d$+=t.usd;dR+=t.r;totUsd+=t.usd;totR+=t.r;n++;}
-  const p5=rows.filter(x=>x.strat==='p5').length,rev=rows.filter(x=>x.strat==='rev').length;
-  console.log(`${day}:  ${rows.length} trades (p5 ${p5}, rev ${rev})   R ${dR>=0?'+':''}${dR.toFixed(2)}   $ ${d$>=0?'+':''}${d$.toFixed(0)}`);
+const dk=Object.keys(byDay);
+for(const day of dk){for(const t of byDay[day]){totUsd+=t.usd;totR+=t.r;n++;}}
+if(dk.length<=25){
+  for(const day of dk){const rows=byDay[day];const d$=rows.reduce((a,t)=>a+t.usd,0),dR=rows.reduce((a,t)=>a+t.r,0);const p5=rows.filter(x=>x.strat==='p5').length,rev=rows.filter(x=>x.strat==='rev').length;console.log(`${day}:  ${rows.length} trades (p5 ${p5}, rev ${rev})   R ${dR>=0?'+':''}${dR.toFixed(2)}   $ ${d$>=0?'+':''}${d$.toFixed(0)}`);}
+} else {
+  const byMonth={};for(const day of dk){const mk=day.split('-').slice(0,2).join('-');(byMonth[mk]=byMonth[mk]||[]).push(...byDay[day]);}
+  console.log('-- by month --');
+  for(const mk of Object.keys(byMonth)){const rows=byMonth[mk];const m$=rows.reduce((a,t)=>a+t.usd,0),mR=rows.reduce((a,t)=>a+t.r,0);const gd=new Set(rows.map(t=>t.day)).size;console.log(`  ${mk}:  ${rows.length} trades, ${gd} days   R ${mR>=0?'+':''}${mR.toFixed(1)}   $ ${m$>=0?'+':''}${m$.toFixed(0)}`);}
 }
-console.log(`\nWEEK TOTAL:  ${n} trades   R ${totR>=0?'+':''}${totR.toFixed(2)}   $ ${totUsd>=0?'+':''}${totUsd.toFixed(0)}  (1 MNQ)`);
+// summary stats over the window
+const dayKeys=Object.keys(byDay);
+const dayUsd=dayKeys.map(d=>byDay[d].reduce((a,t)=>a+t.usd,0));
+const green=dayUsd.filter(v=>v>0).length, red=dayUsd.filter(v=>v<0).length;
+const best=Math.max(...dayUsd), worst=Math.min(...dayUsd);
+let peak=0,cum=0,maxDD=0; for(const v of dayUsd){cum+=v;peak=Math.max(peak,cum);maxDD=Math.min(maxDD,cum-peak);}
+const wins=wk.filter(t=>t.r>0).length;
+console.log(`\nTOTAL:  ${n} trades   R ${totR>=0?'+':''}${totR.toFixed(2)}   $ ${totUsd>=0?'+':''}${totUsd.toFixed(0)}  (1 MNQ)`);
+console.log(`  trading days ${dayKeys.length} (green ${green} / red ${red})   trade win% ${(100*wins/n).toFixed(0)}%`);
+console.log(`  best day $${best.toFixed(0)}   worst day $${worst.toFixed(0)}   max $ drawdown $${maxDD.toFixed(0)}   avg $/day ${(totUsd/dayKeys.length).toFixed(0)}`);
 console.log(`Note: P5 ${P5_STOP}xATR stop, reversion 0.5xATR, ${SLIP}pt slip. Idealized fills (esp. reversion limits).`);
 const lastDay=ymd(b[b.length-1][0]);
 console.log(`Data ends ${lastDay} — any week days after that are NOT included.`);

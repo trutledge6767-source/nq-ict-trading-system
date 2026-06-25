@@ -145,14 +145,11 @@ if strategy.position_size < 0 and not na(eStop)
 if lastRthBar and strategy.position_size != 0
     strategy.close_all(comment="EOD flat")
 
-// ---------- robust close webhook: fire on EVERY newly-closed trade (real fill price) ----------
-var int prevClosed = 0
-if strategy.closedtrades > prevClosed
-    for i = prevClosed to strategy.closedtrades - 1
-        exP = strategy.closedtrades.exit_price(i)
-        sz  = strategy.closedtrades.size(i)        // signed: + long / - short
-        alert('{"action":"close","side":"' + (sz > 0 ? "long" : "short") + '","symbol":"' + syminfo.ticker + '","price":' + str.tostring(exP) + '}', alert.freq_once_per_bar_close)
-    prevClosed := strategy.closedtrades
+// ---------- close webhook: fire once when the position returns to flat (loop-free, safe) ----------
+var float prevPosFlat = 0.0
+if strategy.position_size == 0 and prevPosFlat != 0
+    alert('{"action":"close","side":"' + (prevPosFlat > 0 ? "long" : "short") + '","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + '}', alert.freq_once_per_bar_close)
+prevPosFlat := strategy.position_size
 
 plot(inRTH ? pdHi : na, "Prior-day High", color=color.new(color.teal,0), style=plot.style_linebr, linewidth=2)
 plot(inRTH ? pdLo : na, "Prior-day Low",  color=color.new(color.maroon,0), style=plot.style_linebr, linewidth=2)

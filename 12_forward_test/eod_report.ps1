@@ -11,9 +11,10 @@ if (-not (Test-Path $repDir)) { New-Item -ItemType Directory -Path $repDir | Out
 $today   = (Get-Date).ToString('yyyy-MM-dd')
 $outFile = Join-Path $repDir "report_$today.txt"
 
-# run the report (node must be on PATH)
+# run the report + reversion fill tracker (node must be on PATH)
 $report = & node (Join-Path $dir 'forward_report.js') 2>&1 | Out-String
-$report | Set-Content $outFile -Encoding ascii
+$revfills = & node (Join-Path $dir 'rev_fill_track.js') 2>&1 | Out-String
+($report + "`n" + $revfills) | Set-Content $outFile -Encoding ascii
 
 # pull a one-line summary (the PORTFOLIO line if present, else event count)
 $summary = ($report -split "`n" | Where-Object { $_ -match 'PORTFOLIO|total events' } | Select-Object -First 1)
