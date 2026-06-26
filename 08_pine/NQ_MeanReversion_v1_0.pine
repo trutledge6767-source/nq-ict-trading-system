@@ -1,21 +1,15 @@
 //@version=6
 // =====================================================================
 // NQ Intraday Mean-Reversion Sleeve — v1.0  (companion to P5 breakout)
-// The data-validated DIVERSIFIER for the prior-day-breakout strategy
-// (NQ_PDHL_breakout_v1_0). Research (01_research/FUNDED_SPEED_RESEARCH.md):
-//   * Edge:  fade price that is >k*ATR from the intraday SMA; target = the mean.
-//   * Why:   daily-R correlation with P5 = -0.22 (negative). Blending P5 + 0.5x
-//            this raises annualized Sharpe 1.66 -> 2.13 and cuts funded median
-//            time-to-pass ~5.7mo -> ~4.0mo at the SAME pass/ruin. Holds OOS
-//            (sleeve Sharpe 0.50 IS -> 1.76 OOS; regime-complementary to P5).
-//   * EXECUTION IS CRITICAL: a fade is slippage-fragile on MARKET orders
-//     (breakeven ~1.5pt RT). It MUST use LIMIT entries (passive). With a limit
-//     at signal-close +0.25*ATR the edge ~doubles (+0.119R) and goes 8/8 yrs.
-//     -> this script uses strategy.entry(..., limit=...). DO NOT switch to market.
-//   * Tight 0.5*ATR stop is mandatory (wider = trend-day blowups, negative).
-//   * Flat by RTH close (no overnight). High trade count (~6/day) -> size small.
-// Caveat: backtested fill model is optimistic (fills on touch); FORWARD-TEST
-// fill quality before trusting magnitudes. NON-REPAINTING (closed-bar signals).
+// Fade price >k*ATR from the intraday SMA; passive LIMIT entry; 0.5*ATR stop;
+// target = the mean; time-stop; flat by RTH close. Funded survival sizing.
+//
+// ALERTING (2026-06-26): webhooks fire on ACTUAL ORDER FILLS via alert_message
+// on every order (limit entry + every exit). The TV alert must be a STRATEGY
+// alert set to "Order fills" (NOT "alert() function calls only"). The stop level
+// is set on fill via the reliable strategy.opentrades counter (not a position-
+// change check). {{strategy.order.price}} = the real fill price. Same JSON the
+// forward logger already parses.
 // =====================================================================
 strategy("NQ Mean-Reversion sleeve v1.0", overlay=true, pyramiding=0,
      default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=50000,
@@ -72,44 +66,43 @@ calcQty(stopDist) =>
     q = rawRisk > 0 ? math.floor((strategy.equity*riskPct)/rawRisk) : 0
     math.max(1, math.min(maxContracts, q))
 
-// ---------- passive LIMIT entries (mandatory; market orders kill the edge) ----------
+closeMsg = '{"action":"close","symbol":"' + syminfo.ticker + '","price":{{strategy.order.price}}}'
+
+// ---------- passive LIMIT entries (order-fill alert on the entry) ----------
 var int pendSince = na
 if strategy.position_size == 0
     qty = calcQty(stopExtra*atr)
     if overbought and canSig
-        strategy.entry("R", strategy.short, qty=qty, limit = close + entryOff*atr)
+        lim = close + entryOff*atr
+        strategy.entry("R", strategy.short, qty=qty, limit=lim, alert_message='{"action":"entry","side":"short","symbol":"' + syminfo.ticker + '","price":{{strategy.order.price}},"sl":' + str.tostring(lim + stopExtra*atr) + '}')
         pendSince := bar_index
     else if oversold and canSig
-        strategy.entry("R", strategy.long, qty=qty, limit = close - entryOff*atr)
+        lim = close - entryOff*atr
+        strategy.entry("R", strategy.long, qty=qty, limit=lim, alert_message='{"action":"entry","side":"long","symbol":"' + syminfo.ticker + '","price":{{strategy.order.price}},"sl":' + str.tostring(lim - stopExtra*atr) + '}')
         pendSince := bar_index
     else if not na(pendSince) and (bar_index - pendSince) >= fillWin
         strategy.cancel("R")
         pendSince := na
 
-// ---------- capture fill, manage bracket (stop + dynamic mean target) ----------
+// ---------- on FILL (reliable opentrades counter): set stop level + time-stop anchor ----------
 var float eStop = na
 var int   eBar  = na
-justEntered = strategy.position_size != 0 and strategy.position_size[1] == 0
-if justEntered
+var int   prevOpenRev = 0
+if strategy.opentrades > prevOpenRev
     eBar := bar_index
     eStop := strategy.position_size > 0 ? strategy.position_avg_price - stopExtra*atr : strategy.position_avg_price + stopExtra*atr
     pendSince := na
     tradesToday += 1
-    alert('{"action":"entry","side":"' + (strategy.position_size>0?"long":"short") + '","symbol":"' + syminfo.ticker + '","price":' + str.tostring(strategy.position_avg_price) + ',"sl":' + str.tostring(eStop) + '}', alert.freq_once_per_bar_close)
+prevOpenRev := strategy.opentrades
 
+// ---------- exits (order-fill alert on every exit) ----------
 if strategy.position_size != 0 and not na(eStop)
-    strategy.exit("X", from_entry="R", stop=eStop, limit=sma)   // target = revert to the mean (dynamic)
+    strategy.exit("X", from_entry="R", stop=eStop, limit=sma, alert_message=closeMsg)   // stop OR revert-to-mean target
     if bar_index - eBar >= maxBars
-        strategy.close("R", comment="time-stop")
+        strategy.close("R", comment="time-stop", alert_message=closeMsg)
 
 if lastBar and strategy.position_size != 0
-    strategy.close("R", comment="EOD flat")
-
-// ---------- close webhook: fire once when the position returns to flat (loop-free, safe) ----------
-var float prevPosFlat = 0.0
-if strategy.position_size == 0 and prevPosFlat != 0
-    alert('{"action":"close","side":"' + (prevPosFlat > 0 ? "long" : "short") + '","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + '}', alert.freq_once_per_bar_close)
-prevPosFlat := strategy.position_size
+    strategy.close("R", comment="EOD flat", alert_message=closeMsg)
 
 // ---------- plots ----------
 plot(inRTH ? sma : na, "Mean (SMA)", color=color.new(color.gray,0))

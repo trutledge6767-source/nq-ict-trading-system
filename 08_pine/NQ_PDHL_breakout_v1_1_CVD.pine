@@ -1,18 +1,14 @@
 //@version=6
 // =====================================================================
 // NQ Prior-Day High/Low Breakout + ORDER-FLOW (CVD) — v1.1
-// v1.0 (P5) + session Cumulative Volume Delta confirmation. Research
-// (01_research/FUNDED_SPEED_RESEARCH.md, OF-iter 1-2): requiring the breakout
-// to be backed by aligned net buying/selling (session CVD same sign as the
-// break) lifts per-trade expR +0.52->+0.67R, ann Sharpe 1.66->1.71, and CUTS
-// funded ruin 7.6%->4.9% / pass 92.4%->95.1% — while STAYING 8/8 positive years
-// (the only filter in the project that improved the edge without hurting robustness).
+// P5 breakout + session CVD confirmation. Funded survival sizing.
 //
-// CVD here = session close-location volume delta proxy (matches the backtest exactly,
-// uses only `volume`). OPTIONAL UPGRADE: swap to true ta.requestVolumeDelta() for tick
-// delta — but RE-VALIDATE first; the proxy is what was tested.
-// Core P5 unchanged: prior-day RTH H/L break, 1xATR stop (0.75 eval), hold-to-close,
-// flat overnight, funded sizing. NON-REPAINTING (closed-bar signals + prior-day level).
+// ALERTING (v1.1-of2, 2026-06-26): webhooks now fire on ACTUAL ORDER FILLS via
+// alert_message on every strategy order (entry + every exit), with the TV alert
+// set to "Order fills". This replaces the fragile position-change detection that
+// missed stop-outs in realtime. {{strategy.order.price}} = the real fill price.
+// Same JSON the forward logger already parses. Create the alert as a STRATEGY
+// alert -> "Order fills" (NOT "alert() function calls only").
 // =====================================================================
 strategy("NQ PDHL Breakout + CVD v1.1", overlay=true, pyramiding=0,
      default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=50000,
@@ -68,7 +64,7 @@ else if inRTH
 
 atr = ta.atr(atrLen)
 
-// ---------- session CVD (close-location volume-delta proxy; matches backtest) ----------
+// ---------- session CVD (close-location volume-delta proxy) ----------
 clv = high > low ? ((close-low)-(high-close))/(high-low) : 0.0
 barDelta = clv * volume
 var float cvd = 0.0
@@ -97,8 +93,8 @@ canTrade = inRTH and etMin < cutoff and not lastRthBar and not tradedToday and s
 // ---------- signals (+ CVD confirmation) ----------
 upBreak = trigClose ? close > pdHi : high > pdHi
 dnBreak = trigClose ? close < pdLo : low  < pdLo
-cvdLongOK  = not useCVD or cvd > 0      // net buying supports the up-break
-cvdShortOK = not useCVD or cvd < 0      // net selling supports the down-break
+cvdLongOK  = not useCVD or cvd > 0
+cvdShortOK = not useCVD or cvd < 0
 longSig  = canTrade and upBreak and cvdLongOK
 shortSig = canTrade and dnBreak and not upBreak and cvdShortOK
 
@@ -107,49 +103,44 @@ calcQty(stopDist) =>
     q = rawRisk > 0 ? math.floor((strategy.equity*riskPct)/rawRisk) : 0
     math.max(1, math.min(maxContracts, q))
 
+// close webhook JSON (logger reads action+price; pairs side from the open) — {{strategy.order.price}} = real fill
+closeMsg = '{"action":"close","symbol":"' + syminfo.ticker + '","price":{{strategy.order.price}}}'
+
 var float ePrice = na
 var float eStop  = na
 var float eRisk  = na
 if longSig
     risk = stopAtrMlt*atr
     if risk > 0
-        strategy.entry("L", strategy.long, qty=calcQty(risk))
         ePrice := close
         eStop  := close - risk
         eRisk  := risk
         tradesToday += 1
         tradedToday := true
-        alert('{"action":"entry","side":"long","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"sl":' + str.tostring(close-risk) + ',"cvd":' + str.tostring(cvd) + '}', alert.freq_once_per_bar_close)
+        strategy.entry("L", strategy.long, qty=calcQty(risk), alert_message='{"action":"entry","side":"long","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"sl":' + str.tostring(close-risk) + ',"cvd":' + str.tostring(cvd) + '}')
 else if shortSig
     risk = stopAtrMlt*atr
     if risk > 0
-        strategy.entry("S", strategy.short, qty=calcQty(risk))
         ePrice := close
         eStop  := close + risk
         eRisk  := risk
         tradesToday += 1
         tradedToday := true
-        alert('{"action":"entry","side":"short","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"sl":' + str.tostring(close+risk) + ',"cvd":' + str.tostring(cvd) + '}', alert.freq_once_per_bar_close)
+        strategy.entry("S", strategy.short, qty=calcQty(risk), alert_message='{"action":"entry","side":"short","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"sl":' + str.tostring(close+risk) + ',"cvd":' + str.tostring(cvd) + '}')
 
 if strategy.position_size > 0 and not na(eStop)
     if useTgt
-        strategy.exit("xL", from_entry="L", stop=eStop, limit=ePrice + rr*eRisk)
+        strategy.exit("xL", from_entry="L", stop=eStop, limit=ePrice + rr*eRisk, alert_message=closeMsg)
     else
-        strategy.exit("xL", from_entry="L", stop=eStop)
+        strategy.exit("xL", from_entry="L", stop=eStop, alert_message=closeMsg)
 if strategy.position_size < 0 and not na(eStop)
     if useTgt
-        strategy.exit("xS", from_entry="S", stop=eStop, limit=ePrice - rr*eRisk)
+        strategy.exit("xS", from_entry="S", stop=eStop, limit=ePrice - rr*eRisk, alert_message=closeMsg)
     else
-        strategy.exit("xS", from_entry="S", stop=eStop)
+        strategy.exit("xS", from_entry="S", stop=eStop, alert_message=closeMsg)
 
 if lastRthBar and strategy.position_size != 0
-    strategy.close_all(comment="EOD flat")
-
-// ---------- close webhook: fire once when the position returns to flat (loop-free, safe) ----------
-var float prevPosFlat = 0.0
-if strategy.position_size == 0 and prevPosFlat != 0
-    alert('{"action":"close","side":"' + (prevPosFlat > 0 ? "long" : "short") + '","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + '}', alert.freq_once_per_bar_close)
-prevPosFlat := strategy.position_size
+    strategy.close_all(comment="EOD flat", alert_message=closeMsg)
 
 plot(inRTH ? pdHi : na, "Prior-day High", color=color.new(color.teal,0), style=plot.style_linebr, linewidth=2)
 plot(inRTH ? pdLo : na, "Prior-day Low",  color=color.new(color.maroon,0), style=plot.style_linebr, linewidth=2)
